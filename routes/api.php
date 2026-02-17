@@ -5,6 +5,9 @@ use App\Http\Controllers\Api\RoomController;
 use App\Http\Controllers\Api\MessageController;
 use App\Http\Controllers\Api\InviteController;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Broadcast;
+
+Broadcast::routes(['middleware' => ['auth:sanctum']]);
 
 // Public
 Route::post('/register', [AuthController::class, 'register'])->middleware('throttle:10,1');

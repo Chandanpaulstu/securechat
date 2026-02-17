@@ -1,5 +1,7 @@
 import { createContext, useContext, useState, useEffect } from 'react';
 import client from '../api/client';
+import { disconnectEcho } from '../hooks/useEcho';
+
 
 const AuthContext = createContext(null);
 
@@ -37,10 +39,11 @@ export function AuthProvider({ children }) {
     };
 
     const logout = async () => {
-        await client.post('/logout').catch(() => {});
-        localStorage.removeItem('token');
-        sessionStorage.clear(); // clear all ECDH key pairs
-        setUser(null);
+    await client.post('/logout').catch(() => {});
+    localStorage.removeItem('token');
+    sessionStorage.clear();
+    disconnectEcho();
+    setUser(null);
     };
 
     return (

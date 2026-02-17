@@ -18,9 +18,16 @@ export function AuthProvider({ children }) {
     }, []);
 
     const login = async (email, password) => {
-        const res = await client.post('/login', { email, password });
-        localStorage.setItem('token', res.data.token);
-        setUser(res.data.user);
+    const res = await client.post('/login', { email, password });
+    localStorage.setItem('token', res.data.token);
+    setUser(res.data.user);
+
+    // Redirect to pending invite if exists
+    const pendingInvite = sessionStorage.getItem('pending_invite');
+    if (pendingInvite) {
+        sessionStorage.removeItem('pending_invite');
+        window.location.href = `/invite/${pendingInvite}`;
+    }
     };
 
     const register = async (name, email, password, password_confirmation) => {

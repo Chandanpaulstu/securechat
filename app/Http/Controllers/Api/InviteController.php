@@ -14,7 +14,7 @@ class InviteController extends Controller
 {
     public function __construct(private BrevoMailService $mailer) {}
 
-    public function send(Request $request, Room $room)
+     public function send(Request $request, Room $room)
     {
         $member = RoomMember::where('room_id', $room->id)
             ->where('user_id', $request->user()->id)
@@ -50,12 +50,18 @@ class InviteController extends Controller
             'inviteUrl'   => $inviteUrl,
         ])->render();
 
-        $this->mailer->send(
-            toEmail: $data['email'],
-            toName: $data['email'],
-            subject: 'You are invited to join ' . $room->name . ' on SecureChat',
-            htmlContent: $html,
-        );
+        try {
+            $this->mailer->send(
+                toEmail: $data['email'],
+                toName: $data['email'],
+                subject: 'You are invited to join ' . $room->name . ' on SecureChat',
+                htmlContent: $html,
+            );
+            \Log::info('Invite email sent to ' . $data['email']);
+        } catch (\Exception $e) {
+            \Log::error('Brevo mail failed: ' . $e->getMessage());
+            return response()->json(['message' => 'Invite created but email failed: ' . $e->getMessage()], 500);
+        }
 
         return response()->json(['message' => 'Invite sent.']);
     }

@@ -9,7 +9,7 @@ import {
 import MessageInput from './MessageInput';
 import InviteModal from './InviteModal';
 
-export default function ChatWindow({ room }) {
+export default function ChatWindow({ room, currentUser }) {
     const { user }                      = useAuth();
     const [messages, setMessages]       = useState([]);
     const [sharedKeys, setSharedKeys]   = useState({}); // userId => CryptoKey
@@ -143,7 +143,7 @@ export default function ChatWindow({ room }) {
                 </div>
                 <div className="flex gap-3 items-center">
                     <span className="text-gray-500 text-sm">{members.length} members</span>
-                    {room.role === 'admin' && (
+                    {room.created_by === currentUser?.id && (
                         <button onClick={() => setShowInvite(true)}
                             className="text-sm bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg transition">
                             + Invite

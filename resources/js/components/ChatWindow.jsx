@@ -10,117 +10,185 @@ import MessageInput from './MessageInput';
 import InviteModal from './InviteModal';
 
 export default function ChatWindow({ room, currentUser }) {
-    const { user }                      = useAuth();
-    const [messages, setMessages]       = useState([]);
-    const [sharedKeys, setSharedKeys]   = useState({}); // userId => CryptoKey
-    const [members, setMembers]         = useState([]);
-    const [myKeyPair, setMyKeyPair]     = useState(null);
-    const [ready, setReady]             = useState(false);
-    const [showInvite, setShowInvite]   = useState(false);
-    const [onlineUsers, setOnlineUsers] = useState([]);
-    const bottomRef                     = useRef(null);
+    const { user }                    = useAuth();
+    const [messages, setMessages]     = useState([]);
+    const [members, setMembers]       = useState([]);
+    const [ready, setReady]           = useState(false);
+    const [showInvite, setShowInvite] = useState(false);
+    const bottomRef                   = useRef(null);
 
-    // Step 1: generate ECDH key pair + register public key with server
+    // Refs to avoid stale closures in WebSocket callbacks
+    const sharedKeysRef = useRef({});
+    const myKeyPairRef  = useRef(null);
+    const roomRef       = useRef(room);
+    const userRef       = useRef(user);
+
+    // Keep refs in sync
+    useEffect(() => { roomRef.current = room; }, [room]);
+    useEffect(() => { userRef.current = user; }, [user]);
+
     useEffect(() => {
         if (!room) return;
         setReady(false);
         setMessages([]);
+        sharedKeysRef.current = {};
+        myKeyPairRef.current  = null;
         setupCrypto();
     }, [room?.id]);
 
     const setupCrypto = async () => {
+        const currentRoom = roomRef.current;
+        if (!currentRoom) return;
+
         try {
-            const keyPair    = await generateKeyPair();
-            const pubKeyB64  = await exportPublicKey(keyPair.publicKey);
+            const keyPair   = await generateKeyPair();
+            const pubKeyB64 = await exportPublicKey(keyPair.publicKey);
 
-            await client.post(`/rooms/${room.id}/public-key`, { public_key: pubKeyB64 });
+            await client.post(`/rooms/${currentRoom.id}/public-key`, { public_key: pubKeyB64 });
+            myKeyPairRef.current = keyPair;
 
-            const membersRes = await client.get(`/rooms/${room.id}/members`);
-            const memberList = membersRes.data;
-            setMembers(memberList);
-
-            // Derive shared AES key with each member
-            const keys = {};
-            for (const m of memberList) {
-                if (m.user.id === user.id || !m.public_key) continue;
-                const peerPub    = await importPublicKey(m.public_key);
-                keys[m.user.id] = await deriveSharedKey(keyPair.privateKey, peerPub);
-            }
-
-            setMyKeyPair(keyPair);
-            setSharedKeys(keys);
+            await refreshKeys(keyPair);
             setReady(true);
 
-            // Load message history
-            const msgRes = await client.get(`/rooms/${room.id}/messages`);
-            const decrypted = await decryptAll(msgRes.data, keys);
+            const msgRes    = await client.get(`/rooms/${currentRoom.id}/messages`);
+            const decrypted = await decryptAll(msgRes.data);
             setMessages(decrypted);
         } catch (err) {
-            console.error('Crypto setup failed:', err);
+            console.error('[Crypto Setup Failed]', err);
         }
     };
 
-    const decryptAll = async (rawMessages, keys) => {
-        const result = [];
+    const refreshKeys = async (keyPair) => {
+        const kp          = keyPair || myKeyPairRef.current;
+        const currentRoom = roomRef.current;
+        const currentUser = userRef.current;
+
+        if (!kp || !currentRoom || !currentUser) {
+            console.warn('[refreshKeys] Missing deps:', { kp: !!kp, room: !!currentRoom, user: !!currentUser });
+            return;
+        }
+
+        try {
+            const membersRes = await client.get(`/rooms/${currentRoom.id}/members`);
+            const memberList = membersRes.data;
+            setMembers(memberList);
+
+            const keys = {};
+            for (const m of memberList) {
+                if (m.user.id === currentUser.id || !m.public_key) continue;
+                try {
+                    const peerPub    = await importPublicKey(m.public_key);
+                    keys[m.user.id] = await deriveSharedKey(kp.privateKey, peerPub);
+                    console.log(`[Crypto] Derived key for user ${m.user.id} (${m.user.name})`);
+                } catch (e) {
+                    console.error(`[Crypto] Failed to derive key for user ${m.user.id}:`, e);
+                }
+            }
+
+            sharedKeysRef.current = keys;
+            console.log('[Crypto] Keys refreshed. User IDs with keys:', Object.keys(keys));
+        } catch (err) {
+            console.error('[refreshKeys failed]', err);
+        }
+    };
+
+    const decryptAll = async (rawMessages) => {
+        const currentUser = userRef.current;
+        const result      = [];
+
         for (const msg of rawMessages) {
-            if (msg.user_id === user.id) {
-                result.push({ ...msg, plaintext: '[You]', self: true });
+            if (msg.user_id === currentUser?.id) {
+                result.push({ ...msg, plaintext: '[Your message]', self: true });
                 continue;
             }
-            const key = keys[msg.user_id];
-            if (!key) { result.push({ ...msg, plaintext: '[Key unavailable]' }); continue; }
+            const key = sharedKeysRef.current[msg.user_id];
+            if (!key) {
+                console.warn(`[Decrypt] No key for user ${msg.user_id}. Available keys:`, Object.keys(sharedKeysRef.current));
+                result.push({ ...msg, plaintext: '[Key unavailable]' });
+                continue;
+            }
             try {
-                const plaintext = await decryptMessage(key, msg.ciphertext, msg.iv, msg.integrity_hash);
+                const plaintext = await decryptMessage(key, msg.ciphertext, msg.iv);
                 result.push({ ...msg, plaintext });
-            } catch {
-                result.push({ ...msg, plaintext: '[Tampered or undecryptable]' });
+            } catch (e) {
+                console.error(`[Decrypt Failed] user=${msg.user_id}`, e.name, e.message);
+                result.push({ ...msg, plaintext: '[Could not decrypt]' });
             }
         }
         return result;
     };
 
-    // Step 2: listen for incoming WebSocket messages
     useRoomChannel(
         room?.id,
         async (event) => {
-            if (event.sender.id === user.id) return;
-            const key = sharedKeys[event.sender.id];
+            const currentUser = userRef.current;
+            if (event.sender.id === currentUser?.id) return;
+
+            console.log('[WS] Message from user', event.sender.id, '| Keys available:', Object.keys(sharedKeysRef.current));
+
+            let key = sharedKeysRef.current[event.sender.id];
+            if (!key) {
+                console.warn('[WS] Key missing, refreshing...');
+                await refreshKeys();
+                key = sharedKeysRef.current[event.sender.id];
+            }
+
             let plaintext = '[Key unavailable]';
             if (key) {
                 try {
-                    plaintext = await decryptMessage(key, event.ciphertext, event.iv, event.integrity_hash);
-                } catch {
-                    plaintext = '[Tampered or undecryptable]';
+                    plaintext = await decryptMessage(key, event.ciphertext, event.iv);
+                } catch (e) {
+                    console.error('[WS Decrypt Failed]', e.name, e.message, {
+                        senderId:   event.sender.id,
+                        ciphertext: event.ciphertext?.slice(0, 20),
+                        iv:         event.iv,
+                    });
+                    plaintext = '[Could not decrypt]';
                 }
             }
-            setMessages(prev => [...prev, { ...event, user_id: event.sender.id, plaintext }]);
+            // Notify RoomList of new unread message
+            window.dispatchEvent(new CustomEvent('new-message', {
+                detail: { roomId: roomRef.current?.id }
+            }));
+
+            setMessages(prev => [...prev, {
+                ...event,
+                user_id:    event.sender.id,
+                sender:     event.sender,
+                created_at: event.created_at,
+                plaintext,
+            }]);
         },
-        (member) => setOnlineUsers(prev => [...prev, member]),
-        (member) => setOnlineUsers(prev => prev.filter(m => m.id !== member.id))
+        async () => {
+            console.log('[WS] Member joined, refreshing keys...');
+            await refreshKeys();
+        },
+        () => {}
     );
 
-    // Step 3: send encrypted message
     const handleSend = async (text) => {
         if (!text.trim() || !ready) return;
 
-        // Encrypt for each member separately, send one payload
-        // For simplicity here — using first available shared key
-        // In production you'd send per-recipient ciphertext
-        const memberIds = Object.keys(sharedKeys);
-        if (!memberIds.length) return;
+        const memberIds = Object.keys(sharedKeysRef.current);
+        if (!memberIds.length) {
+            alert('No other members with keys. Ask them to open the room first.');
+            return;
+        }
 
-        const sharedKey = sharedKeys[memberIds[0]];
+        const sharedKey = sharedKeysRef.current[memberIds[0]];
         const payload   = await encryptMessage(sharedKey, text);
 
-        const res = await client.post(`/rooms/${room.id}/messages`, payload);
-
-        // Show our own message immediately
-        setMessages(prev => [...prev, {
-            ...res.data,
-            plaintext: text,
-            self: true,
-            sender: { id: user.id, name: 'You' },
-        }]);
+        try {
+            const res = await client.post(`/rooms/${roomRef.current.id}/messages`, payload);
+            setMessages(prev => [...prev, {
+                ...res.data,
+                plaintext: text,
+                self:      true,
+                sender:    { id: userRef.current.id, name: 'You' },
+            }]);
+        } catch (err) {
+            console.error('[Send Failed]', err);
+        }
     };
 
     useEffect(() => {
@@ -135,7 +203,6 @@ export default function ChatWindow({ room, currentUser }) {
 
     return (
         <div className="flex-1 flex flex-col bg-gray-950">
-            {/* Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800">
                 <div>
                     <h2 className="text-white font-semibold"># {room.name}</h2>
@@ -152,7 +219,6 @@ export default function ChatWindow({ room, currentUser }) {
                 </div>
             </div>
 
-            {/* Messages */}
             <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
                 {!ready && (
                     <div className="text-center text-gray-500 text-sm py-8">Setting up encryption...</div>
@@ -178,10 +244,7 @@ export default function ChatWindow({ room, currentUser }) {
             </div>
 
             <MessageInput onSend={handleSend} disabled={!ready} />
-
-            {showInvite && (
-                <InviteModal room={room} onClose={() => setShowInvite(false)} />
-            )}
+            {showInvite && <InviteModal room={room} onClose={() => setShowInvite(false)} />}
         </div>
     );
 }

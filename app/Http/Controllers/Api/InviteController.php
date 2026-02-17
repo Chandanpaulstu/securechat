@@ -66,7 +66,7 @@ class InviteController extends Controller
         return response()->json(['message' => 'Invite sent.']);
     }
 
-    public function accept(Request $request, string $token)
+     public function accept(Request $request, string $token)
     {
         $invite = RoomInvite::where('token', $token)->first();
 
@@ -75,6 +75,15 @@ class InviteController extends Controller
         }
 
         $userId = $request->user()->id;
+        $userEmail = $request->user()->email;
+
+        // Ensure the logged-in user matches the invite recipient
+        if ($userEmail !== $invite->email) {
+            return response()->json([
+                'message' => 'This invite was sent to ' . $invite->email . '. Please login with that account.',
+                'wrong_account' => true,
+            ], 403);
+        }
 
         $already = RoomMember::where('room_id', $invite->room_id)
             ->where('user_id', $userId)

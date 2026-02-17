@@ -1,0 +1,15 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class Message extends Model
+{
+    protected $fillable = ['room_id', 'user_id', 'ciphertext', 'iv', 'integrity_hash'];
+
+    public function sender()
+    {
+        return $this->belongsTo(User::class, 'user_id');
+    }
+}

@@ -314,40 +314,40 @@ export default function ChatWindow({ room, currentUser }) {
     );
 
     const handleSend = async (text) => {
-        if (!text.trim() || !ready) return;
+    if (!text.trim() || !ready) return;
 
-        handleTyping(false);
-        if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    handleTyping(false);
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
 
-        const memberIds = Object.keys(sharedKeysRef.current);
-        if (!memberIds.length) {
-            showToast('No other members available', 'warning');
-            return;
-        }
+    const memberIds = Object.keys(sharedKeysRef.current);
+    if (!memberIds.length) {
+        showToast('No other members available', 'warning');
+        return;
+    }
 
-        const sharedKey = sharedKeysRef.current[memberIds[0]];
-        const payload   = await encryptMessage(sharedKey, text);
+    const sharedKey = sharedKeysRef.current[memberIds[0]];
+    const payload   = await encryptMessage(sharedKey, text);
 
-        try {
-            const res = await client.post(`/rooms/${roomRef.current.id}/messages`, payload);
+    try {
+        const res = await client.post(`/rooms/${roomRef.current.id}/messages`, payload);
 
-            const newMessage = {
-                ...res.data,
-                plaintext: text,
-                self: true,
-                sender: { id: userRef.current.id, name: 'You' },
-                status: 'sent',
-            };
+        const newMessage = {
+            ...res.data,
+            plaintext: text,
+            self: true,
+            sender: userRef.current, // ← FIX: Use actual user object instead of { name: 'You' }
+            status: 'sent',
+        };
 
-            setMessages(prev => [...prev, newMessage]);
+        setMessages(prev => [...prev, newMessage]);
 
-            const storageKey = `own_messages_${roomRef.current.id}`;
-            const stored = JSON.parse(localStorage.getItem(storageKey) || '[]');
-            stored.push({ id: res.data.id, plaintext: text, created_at: res.data.created_at });
-            localStorage.setItem(storageKey, JSON.stringify(stored));
-        } catch (err) {
-            showToast('Failed to send message', 'error');
-        }
+        const storageKey = `own_messages_${roomRef.current.id}`;
+        const stored = JSON.parse(localStorage.getItem(storageKey) || '[]');
+        stored.push({ id: res.data.id, plaintext: text, created_at: res.data.created_at });
+        localStorage.setItem(storageKey, JSON.stringify(stored));
+    } catch (err) {
+        showToast('Failed to send message', 'error');
+    }
     };
 
     useEffect(() => {
@@ -378,11 +378,17 @@ export default function ChatWindow({ room, currentUser }) {
                     <h2 className="text-white font-semibold"># {room.name}</h2>
                     <div className="flex items-center gap-3 mt-1">
                         <p className="text-xs text-green-400">🔒 End-to-end encrypted</p>
-                        {onlineCount > 0 && (
+                        {onlineCount > 0 ? (
                             <p className="text-xs text-blue-400">
                                 <span className="inline-block w-2 h-2 bg-blue-400 rounded-full mr-1 animate-pulse"></span>
                                 {onlineCount} online
                             </p>
+                        ) : (
+                            members.length > 1 && members.find(m => m.user.id !== user?.id)?.user?.last_seen_at && (
+                                <p className="text-xs text-gray-500">
+                                    Last seen {timeAgo(members.find(m => m.user.id !== user?.id).user.last_seen_at)}
+                                </p>
+                            )
                         )}
                         {connectionState === 'connecting' && (
                             <p className="text-xs text-yellow-400">Connecting...</p>

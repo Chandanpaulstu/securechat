@@ -42,3 +42,17 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     Route::post('/rooms/{room}/invite', [InviteController::class, 'send']);
     Route::post('/invites/{token}/accept', [InviteController::class, 'accept']);
 });
+Route::get('/users/{user}', function ($userId) {
+    $user = \App\Models\User::findOrFail($userId);
+    return response()->json([
+        'id' => $user->id,
+        'name' => $user->name,
+        'email' => $user->email,
+        'avatar' => $user->avatar,
+        'avatar_color' => $user->avatar_color,
+        'initials' => $user->initials,
+        'last_seen_at' => $user->last_seen_at,
+        'created_at' => $user->created_at,
+        'is_online' => $user->last_seen_at && $user->last_seen_at->diffInMinutes(now()) < 5,
+    ]);
+})->middleware('auth:sanctum');

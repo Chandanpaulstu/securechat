@@ -15,6 +15,7 @@ import InviteModal from './InviteModal';
 import TypingIndicator from './TypingIndicator';
 import Avatar from './Avatar';
 import ToastContainer from './ToastContainer';
+import UserProfileModal from './UserProfileModal';
 
 // ─── WhatsApp-style SVG pattern ───────
 const WA_PATTERN_SVG = `url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%234a5568' fill-opacity='0.08'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`;
@@ -70,6 +71,10 @@ export default function ChatWindow({ room, currentUser }) {
     const [replyingTo, setReplyingTo] = useState(null);
     const [editingMessage, setEditingMessage] = useState(null);
     const [showThemePicker, setShowThemePicker] = useState(false);
+    const [showSearch, setShowSearch] = useState(false);
+    const [searchQuery, setSearchQuery] = useState('');
+    const [searchResults, setSearchResults] = useState([]);
+    const [showProfile, setShowProfile] = useState(null);
     const [chatTheme, setChatTheme]   = useState(
         () => localStorage.getItem('chat_theme') || 'whatsapp'
     );
@@ -105,6 +110,31 @@ export default function ChatWindow({ room, currentUser }) {
         setShowThemePicker(false);
     };
 
+    // ─── Message Search ───
+    const handleSearch = (query) => {
+        setSearchQuery(query);
+        if (!query.trim()) {
+            setSearchResults([]);
+            return;
+        }
+        const results = messages.filter(msg =>
+            msg.plaintext.toLowerCase().includes(query.toLowerCase())
+        );
+        setSearchResults(results);
+    };
+
+    const scrollToMessage = (messageId) => {
+        const element = document.getElementById(`msg-${messageId}`);
+        if (element) {
+            element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            element.classList.add('bg-yellow-500/20');
+            setTimeout(() => element.classList.remove('bg-yellow-500/20'), 2000);
+        }
+        setShowSearch(false);
+        setSearchQuery('');
+        setSearchResults([]);
+    };
+
     useEffect(() => {
         if (!hasRequestedNotificationPermission.current && 'Notification' in window) {
             if (Notification.permission === 'default') Notification.requestPermission();
@@ -120,6 +150,9 @@ export default function ChatWindow({ room, currentUser }) {
         setOnlineUsers([]);
         setReplyingTo(null);
         setEditingMessage(null);
+        setShowSearch(false);
+        setSearchQuery('');
+        setSearchResults([]);
         sharedKeysRef.current = {};
         myKeyPairRef.current  = null;
         setupCrypto();
@@ -274,7 +307,7 @@ export default function ChatWindow({ room, currentUser }) {
     const startEdit = (message) => {
         if (!message.self) return;
         setEditingMessage(message);
-        setReplyingTo(null); // cancel reply if editing
+        setReplyingTo(null);
     };
 
     const cancelEdit = () => setEditingMessage(null);
@@ -303,7 +336,6 @@ export default function ChatWindow({ room, currentUser }) {
                     : m
             ));
 
-            // Update localStorage plaintext
             const storageKey = `own_messages_${roomRef.current.id}`;
             const stored  = JSON.parse(localStorage.getItem(storageKey) || '[]');
             const updated = stored.map(m =>
@@ -321,7 +353,6 @@ export default function ChatWindow({ room, currentUser }) {
     // ─── WebSocket channel ───────────
     const { connectionState } = useRoomChannel(
         room?.id,
-        // New message
         async (event) => {
             const currentUser = userRef.current;
             if (event.sender.id === currentUser?.id) return;
@@ -351,14 +382,11 @@ export default function ChatWindow({ room, currentUser }) {
             try { await client.post(`/rooms/${roomRef.current.id}/messages/${event.id}/delivered`); } catch (e) {}
             window.dispatchEvent(new CustomEvent('new-message', { detail: { roomId: roomRef.current?.id } }));
         },
-        // Member joined
         (member) => {
             setOnlineUsers(prev => prev.find(u => u.id === member.id) ? prev : [...prev, member]);
             refreshKeys();
         },
-        // Member left
         (member) => setOnlineUsers(prev => prev.filter(u => u.id !== member.id)),
-        // Typing
         (typingEvent) => {
             const { user_id, user_name, is_typing } = typingEvent;
             if (user_id === userRef.current?.id) return;
@@ -367,22 +395,17 @@ export default function ChatWindow({ room, currentUser }) {
                 return prev.filter(u => u.id !== user_id);
             });
         },
-        // Here (presence joined)
         (members) => { setOnlineUsers(members); markMessagesSeen(); },
-        // Message delivered
         (event) => setMessages(prev => prev.map(m =>
             m.id === event.message_id ? { ...m, status: 'delivered' } : m
         )),
-        // Message seen
         (event) => setMessages(prev => prev.map(m =>
             m.id === event.message_id ? { ...m, status: 'seen' } : m
         )),
-        // Message deleted
         (event) => {
             setMessages(prev => prev.filter(m => m.id !== event.message_id));
             showToast('Message deleted', 'info');
         },
-        // Message edited (broadcast from other user)
         (event) => {
             const key = sharedKeysRef.current[event.sender_id];
             if (key) {
@@ -459,7 +482,7 @@ export default function ChatWindow({ room, currentUser }) {
 
             {/* ── Header ────── */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800 bg-gray-900 z-10">
-                <div>
+                <div className="flex-1">
                     <h2 className="text-white font-semibold"># {room.name}</h2>
                     <div className="flex items-center gap-3 mt-1">
                         <p className="text-xs text-green-400">🔒 End-to-end encrypted</p>
@@ -482,6 +505,15 @@ export default function ChatWindow({ room, currentUser }) {
                 </div>
 
                 <div className="flex gap-3 items-center">
+                    {/* Search button */}
+                    <button
+                        onClick={() => setShowSearch(!showSearch)}
+                        className="text-gray-400 hover:text-white p-1.5 rounded-lg hover:bg-gray-700 transition"
+                        title="Search messages"
+                    >
+                        🔍
+                    </button>
+
                     <span className="text-gray-500 text-sm">{members.length} members</span>
 
                     {/* ── Theme Picker ───*/}
@@ -534,6 +566,40 @@ export default function ChatWindow({ room, currentUser }) {
                 </div>
             </div>
 
+            {/* ── Search Panel ── */}
+            {showSearch && (
+                <div className="px-6 py-4 bg-gray-900 border-b border-gray-800">
+                    <input
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => handleSearch(e.target.value)}
+                        placeholder="Search messages..."
+                        className="w-full bg-gray-800 text-white px-4 py-2 rounded-lg outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                        autoFocus
+                    />
+                    {searchResults.length > 0 && (
+                        <div className="mt-3 max-h-48 overflow-y-auto space-y-2">
+                            {searchResults.map(msg => (
+                                <div
+                                    key={msg.id}
+                                    onClick={() => scrollToMessage(msg.id)}
+                                    className="p-2 bg-gray-800 rounded cursor-pointer hover:bg-gray-700 transition"
+                                >
+                                    <div className="text-xs text-gray-400">{msg.sender?.name}</div>
+                                    <div className="text-sm text-white truncate">{msg.plaintext}</div>
+                                    <div className="text-xs text-gray-500">
+                                        {new Date(msg.created_at).toLocaleString()}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    {searchQuery && searchResults.length === 0 && (
+                        <div className="mt-3 text-sm text-gray-500 text-center">No messages found</div>
+                    )}
+                </div>
+            )}
+
             {/* ── Messages area ────*/}
             <div
                 className="flex-1 overflow-y-auto px-6 py-4 transition-all duration-500"
@@ -547,7 +613,6 @@ export default function ChatWindow({ room, currentUser }) {
 
                 {Object.entries(groupedMessages).map(([date, msgs]) => (
                     <div key={date}>
-                        {/* Date separator */}
                         <div className="flex items-center justify-center my-4">
                             <span className="bg-black/40 backdrop-blur-sm text-gray-300 text-xs px-3 py-1 rounded-full shadow">
                                 {date}
@@ -558,7 +623,8 @@ export default function ChatWindow({ room, currentUser }) {
                             {msgs.map((msg, i) => (
                                 <div
                                     key={i}
-                                    className={`flex gap-3 ${msg.self ? 'flex-row-reverse' : ''} group`}
+                                    id={`msg-${msg.id}`}
+                                    className={`flex gap-3 ${msg.self ? 'flex-row-reverse' : ''} group transition-colors duration-500`}
                                 >
                                     <Avatar
                                         user={msg.sender}
@@ -567,7 +633,10 @@ export default function ChatWindow({ room, currentUser }) {
                                     />
 
                                     <div className={`flex flex-col ${msg.self ? 'items-end' : 'items-start'} flex-1`}>
-                                        <span className="text-xs text-gray-400 mb-1 drop-shadow">
+                                        <span
+                                            className="text-xs text-gray-400 mb-1 drop-shadow cursor-pointer hover:text-gray-300 transition"
+                                            onClick={() => !msg.self && setShowProfile(msg.sender?.id)}
+                                        >
                                             {msg.self ? 'You' : msg.sender?.name}
                                             {!msg.self && msg.sender?.last_seen_at && (
                                                 <span className="ml-2 text-gray-500">
@@ -577,13 +646,11 @@ export default function ChatWindow({ room, currentUser }) {
                                         </span>
 
                                         <div className="flex items-end gap-2">
-                                            {/* ── Bubble ── */}
                                             <div className={`max-w-xs lg:max-w-md rounded-2xl text-sm shadow-md ${
                                                 msg.self
                                                     ? 'bg-indigo-600 text-white rounded-br-sm'
                                                     : 'bg-gray-800/90 backdrop-blur-sm text-gray-100 rounded-bl-sm'
                                             }`}>
-                                                {/* Reply preview */}
                                                 {msg.repliedMessage && (
                                                     <div className={`mx-2 mt-2 px-3 py-1.5 border-l-2 rounded text-xs ${
                                                         msg.self
@@ -601,7 +668,6 @@ export default function ChatWindow({ room, currentUser }) {
                                                 <div className="px-4 py-2">{msg.plaintext}</div>
                                             </div>
 
-                                            {/* ── Action buttons (hover) ── */}
                                             {!msg.self && (
                                                 <button
                                                     onClick={() => startReply(msg)}
@@ -632,7 +698,6 @@ export default function ChatWindow({ room, currentUser }) {
                                             )}
                                         </div>
 
-                                        {/* ── Timestamp + status + edited badge ── */}
                                         <div className="flex items-center gap-2 mt-1">
                                             <span className="text-xs text-gray-500">
                                                 {new Date(msg.created_at).toLocaleTimeString([], {
@@ -660,7 +725,6 @@ export default function ChatWindow({ room, currentUser }) {
                 <div ref={bottomRef} />
             </div>
 
-            {/* ── Reply preview bar ── */}
             {replyingTo && (
                 <div className="px-6 py-3 bg-gray-800 border-t border-gray-700 flex items-center justify-between">
                     <div className="flex items-start gap-2 flex-1 min-w-0">
@@ -684,7 +748,6 @@ export default function ChatWindow({ room, currentUser }) {
                 </div>
             )}
 
-            {/* ── Edit mode bar ─── */}
             {editingMessage && (
                 <div className="px-6 py-3 bg-gray-800 border-t border-gray-700 flex items-center justify-between">
                     <div className="flex items-start gap-2 flex-1 min-w-0">
@@ -708,7 +771,6 @@ export default function ChatWindow({ room, currentUser }) {
 
             <TypingIndicator typingUsers={typingUsers} />
 
-            {/* ── Input — switches between send / edit mode ─── */}
             <MessageInput
                 onSend={editingMessage ? handleEdit : handleSend}
                 onTyping={onInputChange}
@@ -718,6 +780,7 @@ export default function ChatWindow({ room, currentUser }) {
             />
 
             {showInvite && <InviteModal room={room} onClose={() => setShowInvite(false)} />}
+            {showProfile && <UserProfileModal userId={showProfile} onClose={() => setShowProfile(null)} />}
         </div>
     );
 }

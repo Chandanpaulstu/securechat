@@ -32,14 +32,16 @@ export default function ChatWindow({ room, currentUser }) {
     useEffect(() => { userRef.current = user; }, [user]);
 
     useEffect(() => {
-        if (!room) return;
-        setReady(false);
-        setMessages([]);
-        setTypingUsers([]);
-        setOnlineUsers([]);
-        sharedKeysRef.current = {};
-        myKeyPairRef.current  = null;
-        setupCrypto();
+    if (!room) return;
+    setReady(false);
+    setMessages([]);
+    setTypingUsers([]);
+    setOnlineUsers([]);
+    sharedKeysRef.current = {};
+    myKeyPairRef.current  = null;
+    setupCrypto();
+    return () => {
+        };
     }, [room?.id]);
 
     const setupCrypto = async () => {
@@ -109,29 +111,39 @@ export default function ChatWindow({ room, currentUser }) {
     };
 
     const decryptAll = async (rawMessages) => {
-        const currentUser = userRef.current;
-        const result      = [];
+    const currentUser = userRef.current;
+    const currentRoom = roomRef.current;
+    const result      = [];
 
-        for (const msg of rawMessages) {
-            if (msg.user_id === currentUser?.id) {
-                result.push({ ...msg, plaintext: '[Your message]', self: true });
-                continue;
-            }
-            const key = sharedKeysRef.current[msg.user_id];
-            if (!key) {
-                console.warn(`[Decrypt] No key for user ${msg.user_id}`);
-                result.push({ ...msg, plaintext: '[Key unavailable - sender may have cleared browser data]' });
-                continue;
-            }
-            try {
-                const plaintext = await decryptMessage(key, msg.ciphertext, msg.iv);
-                result.push({ ...msg, plaintext });
-            } catch (e) {
-                console.error(`[Decrypt Failed]`, e.name, e.message);
-                result.push({ ...msg, plaintext: '[Could not decrypt]' });
-            }
+    const storageKey = `own_messages_${currentRoom.id}`;
+    const ownMessages = JSON.parse(localStorage.getItem(storageKey) || '[]');
+    const ownMessagesMap = Object.fromEntries(
+        ownMessages.map(m => [m.id, m.plaintext])
+    );
+
+    for (const msg of rawMessages) {
+        if (msg.user_id === currentUser?.id) {
+            const plaintext = ownMessagesMap[msg.id] || '[Your message - plaintext lost]';
+            result.push({ ...msg, plaintext, self: true });
+            continue;
         }
-        return result;
+
+        const key = sharedKeysRef.current[msg.user_id];
+        if (!key) {
+            console.warn(`[Decrypt] No key for user ${msg.user_id}`);
+            result.push({ ...msg, plaintext: '[Key unavailable - ask sender to rejoin room]' });
+            continue;
+        }
+
+        try {
+            const plaintext = await decryptMessage(key, msg.ciphertext, msg.iv);
+            result.push({ ...msg, plaintext });
+        } catch (e) {
+            console.error(`[Decrypt Failed] msg=${msg.id}`, e.name, e.message);
+            result.push({ ...msg, plaintext: '[Could not decrypt - old message]' });
+        }
+    }
+    return result;
     };
 
     const playNotificationSound = () => {
@@ -245,33 +257,46 @@ export default function ChatWindow({ room, currentUser }) {
     );
 
     const handleSend = async (text) => {
-        if (!text.trim() || !ready) return;
+    if (!text.trim() || !ready) return;
 
-        handleTyping(false);
-        if (typingTimeoutRef.current) {
-            clearTimeout(typingTimeoutRef.current);
-        }
+    handleTyping(false);
+    if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+    }
 
-        const memberIds = Object.keys(sharedKeysRef.current);
-        if (!memberIds.length) {
-            alert('No other members with keys. Ask them to open the room first.');
-            return;
-        }
+    const memberIds = Object.keys(sharedKeysRef.current);
+    if (!memberIds.length) {
+        alert('No other members with keys. Ask them to open the room first.');
+        return;
+    }
 
-        const sharedKey = sharedKeysRef.current[memberIds[0]];
-        const payload   = await encryptMessage(sharedKey, text);
+    const sharedKey = sharedKeysRef.current[memberIds[0]];
+    const payload   = await encryptMessage(sharedKey, text);
 
-        try {
-            const res = await client.post(`/rooms/${roomRef.current.id}/messages`, payload);
-            setMessages(prev => [...prev, {
-                ...res.data,
-                plaintext: text,
-                self:      true,
-                sender:    { id: userRef.current.id, name: 'You' },
-            }]);
-        } catch (err) {
-            console.error('[Send Failed]', err);
-        }
+    try {
+        const res = await client.post(`/rooms/${roomRef.current.id}/messages`, payload);
+
+        const newMessage = {
+            ...res.data,
+            plaintext: text,
+            self:      true,
+            sender:    { id: userRef.current.id, name: 'You' },
+        };
+
+        setMessages(prev => [...prev, newMessage]);
+
+        const storageKey = `own_messages_${roomRef.current.id}`;
+        const stored = JSON.parse(localStorage.getItem(storageKey) || '[]');
+        stored.push({
+            id: res.data.id,
+            plaintext: text,
+            created_at: res.data.created_at,
+        });
+        localStorage.setItem(storageKey, JSON.stringify(stored));
+
+    } catch (err) {
+        console.error('[Send Failed]', err);
+    }
     };
 
     useEffect(() => {

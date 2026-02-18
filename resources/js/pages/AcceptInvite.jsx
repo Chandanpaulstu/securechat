@@ -26,7 +26,7 @@ export default function AcceptInvite() {
     const acceptInvite = async () => {
         try {
             await client.post(`/invites/${token}/accept`);
-            setStatus('You have joined the room! Redirecting...');
+            setStatus('✅ Successfully joined! Redirecting...');
             setTimeout(() => navigate('/'), 1500);
         } catch (err) {
             const data = err.response?.data;
@@ -35,8 +35,15 @@ export default function AcceptInvite() {
             if (data?.wrong_account) {
                 setWrongAccount(true);
                 setStatus(data.message);
+            } else if (err.response?.status === 409) {
+                // Already a member
+                setStatus('✅ You are already a member of this room! Redirecting...');
+                setTimeout(() => navigate('/'), 1500);
+            } else if (err.response?.status === 422) {
+                setStatus('⚠️ This invite link has expired or already been used. Check your room list - you might already be a member!');
+                setTimeout(() => navigate('/'), 3000);
             } else {
-                setStatus(data?.message || 'Invalid or expired invite.');
+                setStatus(data?.message || 'Invalid invite link.');
             }
         }
     };
@@ -52,7 +59,7 @@ export default function AcceptInvite() {
             <div className="bg-gray-900 rounded-xl p-8 max-w-sm w-full text-center space-y-4 shadow-xl">
                 <h1 className="text-2xl font-bold text-white">🔐 SecureChat</h1>
 
-                <p className={`text-sm ${error ? 'text-red-400' : 'text-gray-400'}`}>
+                <p className={`text-sm ${error && !wrongAccount ? 'text-yellow-400' : error ? 'text-red-400' : 'text-gray-400'}`}>
                     {status}
                 </p>
 
@@ -81,7 +88,7 @@ export default function AcceptInvite() {
                         onClick={() => navigate('/')}
                         className="text-indigo-400 text-sm hover:underline"
                     >
-                        Go to Dashboard
+                        Go to Dashboard →
                     </button>
                 )}
             </div>

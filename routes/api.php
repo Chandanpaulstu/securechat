@@ -33,6 +33,9 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     Route::get('/rooms/{room}/messages', [MessageController::class, 'index']);
     Route::post('/rooms/{room}/messages', [MessageController::class, 'store']);
     Route::post('/rooms/{room}/typing', [MessageController::class, 'typing']);
+    Route::post('/rooms/{room}/messages/{message}/delivered', [MessageController::class, 'markDelivered']);
+    Route::post('/rooms/{room}/mark-seen', [MessageController::class, 'markSeen']);
+    Route::delete('/rooms/{room}/messages/{message}', [MessageController::class, 'destroy']);
 
     // Invites
     Route::post('/rooms/{room}/invite', [InviteController::class, 'send']);

@@ -6,7 +6,8 @@ use Illuminate\Database\Eloquent\Model;
 
 class Message extends Model
 {
-    protected $fillable = ['room_id', 'user_id', 'ciphertext', 'iv', 'integrity_hash'];
+    protected $fillable = ['room_id', 'user_id', 'ciphertext', 'iv', 'integrity_hash','status',
+        'delivered_at','seen_at', ];
 
     public function sender()
     {

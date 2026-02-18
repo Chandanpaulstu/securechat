@@ -38,7 +38,7 @@ export async function encryptMessage(sharedKey, plaintext) {
     return {
         ciphertext:     btoa(String.fromCharCode(...new Uint8Array(encrypted))),
         iv:             btoa(String.fromCharCode(...iv)),
-        integrity_hash: 'aes-gcm-builtin', // AES-GCM has built-in auth tag
+        integrity_hash: 'aes-gcm-builtin',
     };
 }
 
@@ -53,4 +53,41 @@ export async function decryptMessage(sharedKey, ciphertext, ivBase64) {
     );
 
     return new TextDecoder().decode(decrypted);
+}
+
+// NEW: Keypair persistence helpers
+export async function exportPrivateKey(privateKey) {
+    const jwk = await crypto.subtle.exportKey('jwk', privateKey);
+    return JSON.stringify(jwk);
+}
+
+export async function importPrivateKey(jwkString) {
+    const jwk = JSON.parse(jwkString);
+    return crypto.subtle.importKey('jwk', jwk, ECDH_PARAMS, true, ['deriveKey']);
+}
+
+export async function saveKeyPair(roomId, keyPair) {
+    const publicKeyB64  = await exportPublicKey(keyPair.publicKey);
+    const privateKeyJwk = await exportPrivateKey(keyPair.privateKey);
+
+    localStorage.setItem(`keypair_${roomId}`, JSON.stringify({
+        publicKey: publicKeyB64,
+        privateKey: privateKeyJwk,
+    }));
+}
+
+export async function loadKeyPair(roomId) {
+    const stored = localStorage.getItem(`keypair_${roomId}`);
+    if (!stored) return null;
+
+    try {
+        const { publicKey, privateKey } = JSON.parse(stored);
+        return {
+            publicKey:  await importPublicKey(publicKey),
+            privateKey: await importPrivateKey(privateKey),
+        };
+    } catch (e) {
+        console.error('[Keypair load failed]', e);
+        return null;
+    }
 }

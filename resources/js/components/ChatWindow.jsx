@@ -4,7 +4,8 @@ import { useAuth } from '../context/AuthContext';
 import { useRoomChannel } from '../hooks/useEcho';
 import {
     generateKeyPair, exportPublicKey, importPublicKey,
-    deriveSharedKey, encryptMessage, decryptMessage
+    deriveSharedKey, encryptMessage, decryptMessage,
+    saveKeyPair, loadKeyPair
 } from '../utils/crypto';
 import MessageInput from './MessageInput';
 import InviteModal from './InviteModal';
@@ -14,6 +15,7 @@ export default function ChatWindow({ room, currentUser }) {
     const { user }                    = useAuth();
     const [messages, setMessages]     = useState([]);
     const [members, setMembers]       = useState([]);
+    const [onlineUsers, setOnlineUsers] = useState([]);
     const [ready, setReady]           = useState(false);
     const [showInvite, setShowInvite] = useState(false);
     const [typingUsers, setTypingUsers] = useState([]);
@@ -34,6 +36,7 @@ export default function ChatWindow({ room, currentUser }) {
         setReady(false);
         setMessages([]);
         setTypingUsers([]);
+        setOnlineUsers([]);
         sharedKeysRef.current = {};
         myKeyPairRef.current  = null;
         setupCrypto();
@@ -44,9 +47,19 @@ export default function ChatWindow({ room, currentUser }) {
         if (!currentRoom) return;
 
         try {
-            const keyPair   = await generateKeyPair();
-            const pubKeyB64 = await exportPublicKey(keyPair.publicKey);
+            // Try to load existing keypair from localStorage
+            let keyPair = await loadKeyPair(currentRoom.id);
 
+            if (!keyPair) {
+                // Generate new keypair only if none exists
+                console.log('[Crypto] Generating new keypair for room', currentRoom.id);
+                keyPair = await generateKeyPair();
+                await saveKeyPair(currentRoom.id, keyPair);
+            } else {
+                console.log('[Crypto] Loaded existing keypair from localStorage');
+            }
+
+            const pubKeyB64 = await exportPublicKey(keyPair.publicKey);
             await client.post(`/rooms/${currentRoom.id}/public-key`, { public_key: pubKeyB64 });
             myKeyPairRef.current = keyPair;
 
@@ -82,14 +95,14 @@ export default function ChatWindow({ room, currentUser }) {
                 try {
                     const peerPub    = await importPublicKey(m.public_key);
                     keys[m.user.id] = await deriveSharedKey(kp.privateKey, peerPub);
-                    console.log(`[Crypto] Derived key for user ${m.user.id}`);
+                    console.log(`[Crypto] Derived key for user ${m.user.id} (${m.user.name})`);
                 } catch (e) {
                     console.error(`[Crypto] Failed key for user ${m.user.id}:`, e);
                 }
             }
 
             sharedKeysRef.current = keys;
-            console.log('[Crypto] Keys refreshed:', Object.keys(keys));
+            console.log('[Crypto] Keys refreshed. Available:', Object.keys(keys));
         } catch (err) {
             console.error('[refreshKeys failed]', err);
         }
@@ -106,14 +119,15 @@ export default function ChatWindow({ room, currentUser }) {
             }
             const key = sharedKeysRef.current[msg.user_id];
             if (!key) {
-                result.push({ ...msg, plaintext: '[Key unavailable]' });
+                console.warn(`[Decrypt] No key for user ${msg.user_id}`);
+                result.push({ ...msg, plaintext: '[Key unavailable - sender may have cleared browser data]' });
                 continue;
             }
             try {
                 const plaintext = await decryptMessage(key, msg.ciphertext, msg.iv);
                 result.push({ ...msg, plaintext });
             } catch (e) {
-                console.error(`[Decrypt Failed]`, e);
+                console.error(`[Decrypt Failed]`, e.name, e.message);
                 result.push({ ...msg, plaintext: '[Could not decrypt]' });
             }
         }
@@ -124,7 +138,7 @@ export default function ChatWindow({ room, currentUser }) {
         if (!audioRef.current) {
             audioRef.current = new Audio('/notification.mp3');
         }
-        audioRef.current.play().catch(e => console.log('[Sound blocked]', e));
+        audioRef.current.play().catch(e => console.log('[Sound blocked by browser]', e));
     };
 
     const handleTyping = async (isTyping) => {
@@ -168,6 +182,7 @@ export default function ChatWindow({ room, currentUser }) {
 
             let key = sharedKeysRef.current[event.sender.id];
             if (!key) {
+                console.warn('[WS] Key missing, refreshing...');
                 await refreshKeys();
                 key = sharedKeysRef.current[event.sender.id];
             }
@@ -177,7 +192,7 @@ export default function ChatWindow({ room, currentUser }) {
                 try {
                     plaintext = await decryptMessage(key, event.ciphertext, event.iv);
                 } catch (e) {
-                    console.error('[WS Decrypt Failed]', e);
+                    console.error('[WS Decrypt Failed]', e.name, e.message);
                     plaintext = '[Could not decrypt]';
                 }
             }
@@ -190,39 +205,48 @@ export default function ChatWindow({ room, currentUser }) {
                 plaintext,
             }]);
 
-            // Play notification sound
             playNotificationSound();
 
-            // Notify RoomList for unread count
             window.dispatchEvent(new CustomEvent('new-message', {
                 detail: { roomId: roomRef.current?.id }
             }));
         },
-        async (member) => {
-            console.log('[WS] Member joined');
-            await refreshKeys();
+        (member) => {
+            console.log('[WS] Member joined:', member.name);
+            setOnlineUsers(prev => {
+                if (prev.find(u => u.id === member.id)) return prev;
+                return [...prev, member];
+            });
+            refreshKeys();
         },
-        (member) => {},
+        (member) => {
+            console.log('[WS] Member left:', member.name);
+            setOnlineUsers(prev => prev.filter(u => u.id !== member.id));
+        },
         (typingEvent) => {
-        const { user_id, user_name, is_typing } = typingEvent;
-        const currentUser = userRef.current;
-        if (user_id === currentUser?.id) return;
+            const { user_id, user_name, is_typing } = typingEvent;
+            const currentUser = userRef.current;
 
-        setTypingUsers(prev => {
-            if (is_typing) {
-                if (prev.find(u => u.id === user_id)) return prev;
-                return [...prev, { id: user_id, name: user_name }];
-            } else {
-                return prev.filter(u => u.id !== user_id);
-            }
-        });
-    }
+            if (user_id === currentUser?.id) return;
+
+            setTypingUsers(prev => {
+                if (is_typing) {
+                    if (prev.find(u => u.id === user_id)) return prev;
+                    return [...prev, { id: user_id, name: user_name }];
+                } else {
+                    return prev.filter(u => u.id !== user_id);
+                }
+            });
+        },
+        (members) => {
+            console.log('[WS] Here now:', members.length, 'users');
+            setOnlineUsers(members);
+        }
     );
 
     const handleSend = async (text) => {
         if (!text.trim() || !ready) return;
 
-        // Stop typing indicator
         handleTyping(false);
         if (typingTimeoutRef.current) {
             clearTimeout(typingTimeoutRef.current);
@@ -230,7 +254,7 @@ export default function ChatWindow({ room, currentUser }) {
 
         const memberIds = Object.keys(sharedKeysRef.current);
         if (!memberIds.length) {
-            alert('No other members with keys.');
+            alert('No other members with keys. Ask them to open the room first.');
             return;
         }
 
@@ -260,12 +284,22 @@ export default function ChatWindow({ room, currentUser }) {
         </div>
     );
 
+    const onlineCount = onlineUsers.filter(u => u.id !== user?.id).length;
+
     return (
         <div className="flex-1 flex flex-col bg-gray-950">
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800">
                 <div>
                     <h2 className="text-white font-semibold"># {room.name}</h2>
-                    <p className="text-xs text-green-400">🔒 End-to-end encrypted</p>
+                    <div className="flex items-center gap-3 mt-1">
+                        <p className="text-xs text-green-400">🔒 End-to-end encrypted</p>
+                        {onlineCount > 0 && (
+                            <p className="text-xs text-blue-400">
+                                <span className="inline-block w-2 h-2 bg-blue-400 rounded-full mr-1 animate-pulse"></span>
+                                {onlineCount} online
+                            </p>
+                        )}
+                    </div>
                 </div>
                 <div className="flex gap-3 items-center">
                     <span className="text-gray-500 text-sm">{members.length} members</span>

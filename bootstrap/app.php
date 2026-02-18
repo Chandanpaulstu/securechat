@@ -17,6 +17,14 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->statefulApi();
+
+        // Exclude broadcasting/auth from CSRF verification
+        $middleware->validateCsrfTokens(except: [
+            'api/*',
+            'broadcasting/auth',
+        ]);
+
+        $middleware->appendToGroup('api', \App\Http\Middleware\UpdateLastSeen::class);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //

@@ -9,6 +9,7 @@ use Laravel\Sanctum\HasApiTokens;
 class User extends Authenticatable
 {
     use HasApiTokens, Notifiable;
+    protected $appends = ['initials'];
 
     protected $fillable = [
         'name',
@@ -27,5 +28,14 @@ class User extends Authenticatable
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
         ];
+    }
+
+    public function getInitialsAttribute()
+    {
+        $words = explode(' ', $this->name);
+        if (count($words) >= 2) {
+            return strtoupper(substr($words[0], 0, 1) . substr($words[1], 0, 1));
+        }
+        return strtoupper(substr($this->name, 0, 2));
     }
 }

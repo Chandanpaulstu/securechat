@@ -2,17 +2,23 @@ import { useEffect, useState, useRef } from 'react';
 import client from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { useRoomChannel } from '../hooks/useEcho';
+import { useToast } from '../hooks/useToast';
 import {
     generateKeyPair, exportPublicKey, importPublicKey,
     deriveSharedKey, encryptMessage, decryptMessage,
     saveKeyPair, loadKeyPair
 } from '../utils/crypto';
+import { groupMessagesByDate } from '../utils/groupMessages';
+import { timeAgo } from '../utils/timeAgo';
 import MessageInput from './MessageInput';
 import InviteModal from './InviteModal';
 import TypingIndicator from './TypingIndicator';
+import Avatar from './Avatar';
+import ToastContainer from './ToastContainer';
 
 export default function ChatWindow({ room, currentUser }) {
     const { user }                    = useAuth();
+    const { toasts, showToast, removeToast } = useToast();
     const [messages, setMessages]     = useState([]);
     const [members, setMembers]       = useState([]);
     const [onlineUsers, setOnlineUsers] = useState([]);
@@ -32,7 +38,6 @@ export default function ChatWindow({ room, currentUser }) {
     useEffect(() => { roomRef.current = room; }, [room]);
     useEffect(() => { userRef.current = user; }, [user]);
 
-    // Request notification permission once
     useEffect(() => {
         if (!hasRequestedNotificationPermission.current && 'Notification' in window) {
             if (Notification.permission === 'default') {
@@ -79,10 +84,10 @@ export default function ChatWindow({ room, currentUser }) {
             const decrypted = await decryptAll(msgRes.data);
             setMessages(decrypted);
 
-            // Mark messages as delivered when opening room
             markMessagesDelivered(msgRes.data);
         } catch (err) {
             console.error('[Crypto Setup Failed]', err);
+            showToast('Failed to setup encryption', 'error');
         }
     };
 
@@ -91,10 +96,7 @@ export default function ChatWindow({ room, currentUser }) {
         const currentRoom = roomRef.current;
         const currentUser = userRef.current;
 
-        if (!kp || !currentRoom || !currentUser) {
-            console.warn('[refreshKeys] Missing deps');
-            return;
-        }
+        if (!kp || !currentRoom || !currentUser) return;
 
         try {
             const membersRes = await client.get(`/rooms/${currentRoom.id}/members`);
@@ -107,14 +109,13 @@ export default function ChatWindow({ room, currentUser }) {
                 try {
                     const peerPub    = await importPublicKey(m.public_key);
                     keys[m.user.id] = await deriveSharedKey(kp.privateKey, peerPub);
-                    console.log(`[Crypto] Derived key for user ${m.user.id} (${m.user.name})`);
+                    console.log(`[Crypto] Derived key for user ${m.user.id}`);
                 } catch (e) {
                     console.error(`[Crypto] Failed key for user ${m.user.id}:`, e);
                 }
             }
 
             sharedKeysRef.current = keys;
-            console.log('[Crypto] Keys refreshed. Available:', Object.keys(keys));
         } catch (err) {
             console.error('[refreshKeys failed]', err);
         }
@@ -140,8 +141,7 @@ export default function ChatWindow({ room, currentUser }) {
 
             const key = sharedKeysRef.current[msg.user_id];
             if (!key) {
-                console.warn(`[Decrypt] No key for user ${msg.user_id}`);
-                result.push({ ...msg, plaintext: '[Key unavailable - ask sender to rejoin room]' });
+                result.push({ ...msg, plaintext: '[Key unavailable]' });
                 continue;
             }
 
@@ -149,8 +149,7 @@ export default function ChatWindow({ room, currentUser }) {
                 const plaintext = await decryptMessage(key, msg.ciphertext, msg.iv);
                 result.push({ ...msg, plaintext });
             } catch (e) {
-                console.error(`[Decrypt Failed] msg=${msg.id}`, e.name, e.message);
-                result.push({ ...msg, plaintext: '[Could not decrypt - old message]' });
+                result.push({ ...msg, plaintext: '[Could not decrypt]' });
             }
         }
         return result;
@@ -164,9 +163,7 @@ export default function ChatWindow({ room, currentUser }) {
             if (msg.user_id !== currentUser?.id && msg.status === 'sent') {
                 try {
                     await client.post(`/rooms/${currentRoom.id}/messages/${msg.id}/delivered`);
-                } catch (e) {
-                    console.error('[Mark delivered failed]', e);
-                }
+                } catch (e) {}
             }
         }
     };
@@ -177,16 +174,14 @@ export default function ChatWindow({ room, currentUser }) {
 
         try {
             await client.post(`/rooms/${currentRoom.id}/mark-seen`);
-        } catch (e) {
-            console.error('[Mark seen failed]', e);
-        }
+        } catch (e) {}
     };
 
     const playNotificationSound = () => {
         if (!audioRef.current) {
             audioRef.current = new Audio('/notification.mp3');
         }
-        audioRef.current.play().catch(e => console.log('[Sound blocked]', e));
+        audioRef.current.play().catch(() => {});
     };
 
     const showDesktopNotification = (senderName, text) => {
@@ -201,12 +196,9 @@ export default function ChatWindow({ room, currentUser }) {
 
     const handleTyping = async (isTyping) => {
         if (!roomRef.current) return;
-
         try {
             await client.post(`/rooms/${roomRef.current.id}/typing`, { is_typing: isTyping });
-        } catch (e) {
-            console.error('[Typing event failed]', e);
-        }
+        } catch (e) {}
     };
 
     const onInputChange = (text) => {
@@ -220,14 +212,8 @@ export default function ChatWindow({ room, currentUser }) {
         }
 
         handleTyping(true);
-
-        if (typingTimeoutRef.current) {
-            clearTimeout(typingTimeoutRef.current);
-        }
-
-        typingTimeoutRef.current = setTimeout(() => {
-            handleTyping(false);
-        }, 2000);
+        if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = setTimeout(() => handleTyping(false), 2000);
     };
 
     const deleteMessage = async (messageId) => {
@@ -237,28 +223,24 @@ export default function ChatWindow({ room, currentUser }) {
             await client.delete(`/rooms/${roomRef.current.id}/messages/${messageId}`);
             setMessages(prev => prev.filter(m => m.id !== messageId));
 
-            // Remove from localStorage if it's your own message
             const storageKey = `own_messages_${roomRef.current.id}`;
             const stored = JSON.parse(localStorage.getItem(storageKey) || '[]');
-            const updated = stored.filter(m => m.id !== messageId);
-            localStorage.setItem(storageKey, JSON.stringify(updated));
+            localStorage.setItem(storageKey, JSON.stringify(stored.filter(m => m.id !== messageId)));
+
+            showToast('Message deleted', 'success');
         } catch (err) {
-            console.error('[Delete failed]', err);
-            alert('Failed to delete message.');
+            showToast('Failed to delete message', 'error');
         }
     };
 
-    useRoomChannel(
+    const { connectionState } = useRoomChannel(
         room?.id,
         async (event) => {
             const currentUser = userRef.current;
             if (event.sender.id === currentUser?.id) return;
 
-            console.log('[WS] Message from', event.sender.id);
-
             let key = sharedKeysRef.current[event.sender.id];
             if (!key) {
-                console.warn('[WS] Key missing, refreshing...');
                 await refreshKeys();
                 key = sharedKeysRef.current[event.sender.id];
             }
@@ -268,83 +250,66 @@ export default function ChatWindow({ room, currentUser }) {
                 try {
                     plaintext = await decryptMessage(key, event.ciphertext, event.iv);
                 } catch (e) {
-                    console.error('[WS Decrypt Failed]', e.name, e.message);
                     plaintext = '[Could not decrypt]';
                 }
             }
 
             const newMessage = {
                 ...event,
-                user_id:    event.sender.id,
-                sender:     event.sender,
+                user_id: event.sender.id,
+                sender: event.sender,
                 created_at: event.created_at,
                 plaintext,
-                status:     'delivered',
+                status: 'delivered',
             };
 
             setMessages(prev => [...prev, newMessage]);
-
             playNotificationSound();
             showDesktopNotification(event.sender.name, plaintext);
 
-            // Mark as delivered
             try {
                 await client.post(`/rooms/${roomRef.current.id}/messages/${event.id}/delivered`);
-            } catch (e) {
-                console.error('[Auto-mark delivered failed]', e);
-            }
+            } catch (e) {}
 
             window.dispatchEvent(new CustomEvent('new-message', {
                 detail: { roomId: roomRef.current?.id }
             }));
         },
         (member) => {
-            console.log('[WS] Member joined:', member.name);
-            setOnlineUsers(prev => {
-                if (prev.find(u => u.id === member.id)) return prev;
-                return [...prev, member];
-            });
+            setOnlineUsers(prev => prev.find(u => u.id === member.id) ? prev : [...prev, member]);
             refreshKeys();
         },
         (member) => {
-            console.log('[WS] Member left:', member.name);
             setOnlineUsers(prev => prev.filter(u => u.id !== member.id));
         },
         (typingEvent) => {
             const { user_id, user_name, is_typing } = typingEvent;
-            const currentUser = userRef.current;
-
-            if (user_id === currentUser?.id) return;
+            if (user_id === userRef.current?.id) return;
 
             setTypingUsers(prev => {
                 if (is_typing) {
-                    if (prev.find(u => u.id === user_id)) return prev;
-                    return [...prev, { id: user_id, name: user_name }];
-                } else {
-                    return prev.filter(u => u.id !== user_id);
+                    return prev.find(u => u.id === user_id) ? prev : [...prev, { id: user_id, name: user_name }];
                 }
+                return prev.filter(u => u.id !== user_id);
             });
         },
         (members) => {
-            console.log('[WS] Here now:', members.length, 'users');
             setOnlineUsers(members);
-            markMessagesSeen(); // Mark all as seen when entering room
+            markMessagesSeen();
         },
         (event) => {
-            // Message delivered
             setMessages(prev => prev.map(m =>
                 m.id === event.message_id ? { ...m, status: 'delivered' } : m
             ));
         },
         (event) => {
-            // Message seen
             setMessages(prev => prev.map(m =>
                 m.id === event.message_id ? { ...m, status: 'seen' } : m
             ));
         },
         (event) => {
-            // Message deleted
             setMessages(prev => prev.filter(m => m.id !== event.message_id));
+            showToast('Message deleted', 'info');
         }
     );
 
@@ -352,13 +317,11 @@ export default function ChatWindow({ room, currentUser }) {
         if (!text.trim() || !ready) return;
 
         handleTyping(false);
-        if (typingTimeoutRef.current) {
-            clearTimeout(typingTimeoutRef.current);
-        }
+        if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
 
         const memberIds = Object.keys(sharedKeysRef.current);
         if (!memberIds.length) {
-            alert('No other members with keys. Ask them to open the room first.');
+            showToast('No other members available', 'warning');
             return;
         }
 
@@ -371,24 +334,19 @@ export default function ChatWindow({ room, currentUser }) {
             const newMessage = {
                 ...res.data,
                 plaintext: text,
-                self:      true,
-                sender:    { id: userRef.current.id, name: 'You' },
-                status:    'sent',
+                self: true,
+                sender: { id: userRef.current.id, name: 'You' },
+                status: 'sent',
             };
 
             setMessages(prev => [...prev, newMessage]);
 
             const storageKey = `own_messages_${roomRef.current.id}`;
             const stored = JSON.parse(localStorage.getItem(storageKey) || '[]');
-            stored.push({
-                id: res.data.id,
-                plaintext: text,
-                created_at: res.data.created_at,
-            });
+            stored.push({ id: res.data.id, plaintext: text, created_at: res.data.created_at });
             localStorage.setItem(storageKey, JSON.stringify(stored));
-
         } catch (err) {
-            console.error('[Send Failed]', err);
+            showToast('Failed to send message', 'error');
         }
     };
 
@@ -396,7 +354,6 @@ export default function ChatWindow({ room, currentUser }) {
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
 
-    // Mark messages as seen when scrolling to bottom
     useEffect(() => {
         if (messages.length > 0 && room) {
             markMessagesSeen();
@@ -410,9 +367,12 @@ export default function ChatWindow({ room, currentUser }) {
     );
 
     const onlineCount = onlineUsers.filter(u => u.id !== user?.id).length;
+    const groupedMessages = groupMessagesByDate(messages);
 
     return (
         <div className="flex-1 flex flex-col bg-gray-950">
+            <ToastContainer toasts={toasts} removeToast={removeToast} />
+
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800">
                 <div>
                     <h2 className="text-white font-semibold"># {room.name}</h2>
@@ -423,6 +383,12 @@ export default function ChatWindow({ room, currentUser }) {
                                 <span className="inline-block w-2 h-2 bg-blue-400 rounded-full mr-1 animate-pulse"></span>
                                 {onlineCount} online
                             </p>
+                        )}
+                        {connectionState === 'connecting' && (
+                            <p className="text-xs text-yellow-400">Connecting...</p>
+                        )}
+                        {connectionState === 'unavailable' && (
+                            <p className="text-xs text-red-400">Disconnected - Reconnecting...</p>
                         )}
                     </div>
                 </div>
@@ -437,47 +403,72 @@ export default function ChatWindow({ room, currentUser }) {
                 </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
+            <div className="flex-1 overflow-y-auto px-6 py-4">
                 {!ready && (
                     <div className="text-center text-gray-500 text-sm py-8">Setting up encryption...</div>
                 )}
-                {messages.map((msg, i) => (
-                    <div key={i} className={`flex flex-col ${msg.self ? 'items-end' : 'items-start'} group`}>
-                        <span className="text-xs text-gray-500 mb-1">
-                            {msg.self ? 'You' : msg.sender?.name}
-                        </span>
-                        <div className="flex items-end gap-2">
-                            <div className={`max-w-xs lg:max-w-md px-4 py-2 rounded-2xl text-sm ${
-                                msg.self
-                                    ? 'bg-indigo-600 text-white rounded-br-sm'
-                                    : 'bg-gray-800 text-gray-100 rounded-bl-sm'
-                            }`}>
-                                {msg.plaintext}
-                            </div>
-                            {msg.self && (
-                                <button
-                                    onClick={() => deleteMessage(msg.id)}
-                                    className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 text-xs transition"
-                                    title="Delete for everyone"
-                                >
-                                    🗑️
-                                </button>
-                            )}
-                        </div>
-                        <div className="flex items-center gap-2 mt-1">
-                            <span className="text-xs text-gray-600">
-                                {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+
+                {Object.entries(groupedMessages).map(([date, msgs]) => (
+                    <div key={date}>
+                        <div className="flex items-center justify-center my-4">
+                            <span className="bg-gray-800 text-gray-400 text-xs px-3 py-1 rounded-full">
+                                {date}
                             </span>
-                            {msg.self && (
-                                <span className="text-xs text-gray-500">
-                                    {msg.status === 'seen' && '✓✓ Seen'}
-                                    {msg.status === 'delivered' && '✓✓ Delivered'}
-                                    {msg.status === 'sent' && '✓ Sent'}
-                                </span>
-                            )}
+                        </div>
+
+                        <div className="space-y-3">
+                            {msgs.map((msg, i) => (
+                                <div key={i} className={`flex gap-3 ${msg.self ? 'flex-row-reverse' : ''} group`}>
+                                    <Avatar user={msg.sender} size="sm" online={onlineUsers.some(u => u.id === msg.sender?.id)} />
+
+                                    <div className={`flex flex-col ${msg.self ? 'items-end' : 'items-start'} flex-1`}>
+                                        <span className="text-xs text-gray-500 mb-1">
+                                            {msg.self ? 'You' : msg.sender?.name}
+                                            {!msg.self && msg.sender?.last_seen_at && (
+                                                <span className="ml-2 text-gray-600">
+                                                    · {timeAgo(msg.sender.last_seen_at)}
+                                                </span>
+                                            )}
+                                        </span>
+
+                                        <div className="flex items-end gap-2">
+                                            <div className={`max-w-xs lg:max-w-md px-4 py-2 rounded-2xl text-sm ${
+                                                msg.self
+                                                    ? 'bg-indigo-600 text-white rounded-br-sm'
+                                                    : 'bg-gray-800 text-gray-100 rounded-bl-sm'
+                                            }`}>
+                                                {msg.plaintext}
+                                            </div>
+                                            {msg.self && (
+                                                <button
+                                                    onClick={() => deleteMessage(msg.id)}
+                                                    className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 text-xs transition"
+                                                    title="Delete for everyone"
+                                                >
+                                                    🗑️
+                                                </button>
+                                            )}
+                                        </div>
+
+                                        <div className="flex items-center gap-2 mt-1">
+                                            <span className="text-xs text-gray-600">
+                                                {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                            </span>
+                                            {msg.self && (
+                                                <span className="text-xs text-gray-500">
+                                                    {msg.status === 'seen' && '✓✓ Seen'}
+                                                    {msg.status === 'delivered' && '✓✓'}
+                                                    {msg.status === 'sent' && '✓'}
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
                         </div>
                     </div>
                 ))}
+
                 <div ref={bottomRef} />
             </div>
 

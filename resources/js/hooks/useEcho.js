@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import Echo from 'laravel-echo';
 import Pusher from 'pusher-js';
@@ -6,6 +6,8 @@ import Pusher from 'pusher-js';
 window.Pusher = Pusher;
 
 let echoInstance = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
 
 function getEcho() {
     if (!echoInstance) {
@@ -16,42 +18,79 @@ function getEcho() {
             wsPort: Number(import.meta.env.VITE_REVERB_PORT),
             forceTLS: false,
             enabledTransports: ['ws'],
-            authorizer: (channel) => {
-                return {
-                    authorize: (socketId, callback) => {
-                        axios.post('http://localhost:8000/api/broadcasting/auth', {
-                            socket_id: socketId,
-                            channel_name: channel.name,
-                        }, {
-                            headers: {
-                                Authorization: `Bearer ${localStorage.getItem('token')}`,
-                                Accept: 'application/json',
-                            },
-                        })
-                        .then(res => callback(false, res.data))
-                        .catch(err => callback(true, err));
-                    },
-                };
+            authEndpoint: 'http://localhost:8000/api/broadcasting/auth',
+            auth: {
+                headers: {
+                    Authorization: `Bearer ${localStorage.getItem('token')}`,
+                    Accept: 'application/json',
+                },
             },
+        });
+
+        // Connection state listeners
+        echoInstance.connector.pusher.connection.bind('connected', () => {
+            console.log('[Echo] Connected to WebSocket');
+            reconnectAttempts = 0;
+        });
+
+        echoInstance.connector.pusher.connection.bind('disconnected', () => {
+            console.warn('[Echo] Disconnected from WebSocket');
+        });
+
+        echoInstance.connector.pusher.connection.bind('unavailable', () => {
+            console.error('[Echo] Connection unavailable');
+            attemptReconnect();
+        });
+
+        echoInstance.connector.pusher.connection.bind('failed', () => {
+            console.error('[Echo] Connection failed');
+            attemptReconnect();
         });
     }
     return echoInstance;
+}
+
+function attemptReconnect() {
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        console.error('[Echo] Max reconnection attempts reached');
+        return;
+    }
+
+    reconnectAttempts++;
+    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+
+    console.log(`[Echo] Attempting reconnect ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms`);
+
+    setTimeout(() => {
+        if (echoInstance) {
+            echoInstance.connector.pusher.connect();
+        }
+    }, delay);
 }
 
 export function disconnectEcho() {
     if (echoInstance) {
         echoInstance.disconnect();
         echoInstance = null;
+        reconnectAttempts = 0;
     }
 }
 
 export function useRoomChannel(roomId, onMessage, onJoin, onLeave, onTyping, onHere, onMessageDelivered, onMessageSeen, onMessageDeleted) {
     const channelRef = useRef(null);
+    const [connectionState, setConnectionState] = useState('connecting');
 
     useEffect(() => {
         if (!roomId) return;
 
-        const echo    = getEcho();
+        const echo = getEcho();
+
+        // Monitor connection state
+        const pusher = echo.connector.pusher;
+        pusher.connection.bind('state_change', (states) => {
+            setConnectionState(states.current);
+        });
+
         const channel = echo.join(`room.${roomId}`);
 
         channel
@@ -71,6 +110,5 @@ export function useRoomChannel(roomId, onMessage, onJoin, onLeave, onTyping, onH
         };
     }, [roomId]);
 
-    return channelRef;
+    return { channel: channelRef, connectionState };
 }
-

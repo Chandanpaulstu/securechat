@@ -45,7 +45,7 @@ export function disconnectEcho() {
     }
 }
 
-export function useRoomChannel(roomId, onMessage, onJoin, onLeave) {
+export function useRoomChannel(roomId, onMessage, onJoin, onLeave, onTyping) {
     const channelRef = useRef(null);
 
     useEffect(() => {
@@ -58,7 +58,8 @@ export function useRoomChannel(roomId, onMessage, onJoin, onLeave) {
             .here(() => {})
             .joining((member) => onJoin?.(member))
             .leaving((member) => onLeave?.(member))
-            .listen('.message.sent', (e) => onMessage?.(e));
+            .listen('.message.sent', (e) => onMessage?.(e))
+            .listen('.user.typing', (e) => onTyping?.(e));
 
         channelRef.current = channel;
 

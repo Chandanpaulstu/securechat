@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Events\UserTyping;
 use App\Http\Controllers\Controller;
 use App\Models\Message;
 use App\Models\Room;
@@ -63,5 +64,22 @@ class MessageController extends Controller
         if (!$isMember) {
             abort(403, 'Not a member of this room.');
         }
+    }
+    public function typing(Request $request, Room $room)
+    {
+        $this->authorizeMember($room, $request->user()->id);
+
+        $data = $request->validate([
+            'is_typing' => 'required|boolean',
+        ]);
+
+        broadcast(new UserTyping(
+            $room->id,
+            $request->user()->id,
+            $request->user()->name,
+            $data['is_typing']
+        ))->toOthers();
+
+        return response()->json(['status' => 'ok']);
     }
 }

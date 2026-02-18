@@ -8,6 +8,7 @@ import {
 } from '../utils/crypto';
 import MessageInput from './MessageInput';
 import InviteModal from './InviteModal';
+import TypingIndicator from './TypingIndicator';
 
 export default function ChatWindow({ room, currentUser }) {
     const { user }                    = useAuth();
@@ -15,15 +16,16 @@ export default function ChatWindow({ room, currentUser }) {
     const [members, setMembers]       = useState([]);
     const [ready, setReady]           = useState(false);
     const [showInvite, setShowInvite] = useState(false);
+    const [typingUsers, setTypingUsers] = useState([]);
     const bottomRef                   = useRef(null);
+    const typingTimeoutRef            = useRef(null);
+    const audioRef                    = useRef(null);
 
-    // Refs to avoid stale closures in WebSocket callbacks
     const sharedKeysRef = useRef({});
     const myKeyPairRef  = useRef(null);
     const roomRef       = useRef(room);
     const userRef       = useRef(user);
 
-    // Keep refs in sync
     useEffect(() => { roomRef.current = room; }, [room]);
     useEffect(() => { userRef.current = user; }, [user]);
 
@@ -31,6 +33,7 @@ export default function ChatWindow({ room, currentUser }) {
         if (!room) return;
         setReady(false);
         setMessages([]);
+        setTypingUsers([]);
         sharedKeysRef.current = {};
         myKeyPairRef.current  = null;
         setupCrypto();
@@ -64,7 +67,7 @@ export default function ChatWindow({ room, currentUser }) {
         const currentUser = userRef.current;
 
         if (!kp || !currentRoom || !currentUser) {
-            console.warn('[refreshKeys] Missing deps:', { kp: !!kp, room: !!currentRoom, user: !!currentUser });
+            console.warn('[refreshKeys] Missing deps');
             return;
         }
 
@@ -79,14 +82,14 @@ export default function ChatWindow({ room, currentUser }) {
                 try {
                     const peerPub    = await importPublicKey(m.public_key);
                     keys[m.user.id] = await deriveSharedKey(kp.privateKey, peerPub);
-                    console.log(`[Crypto] Derived key for user ${m.user.id} (${m.user.name})`);
+                    console.log(`[Crypto] Derived key for user ${m.user.id}`);
                 } catch (e) {
-                    console.error(`[Crypto] Failed to derive key for user ${m.user.id}:`, e);
+                    console.error(`[Crypto] Failed key for user ${m.user.id}:`, e);
                 }
             }
 
             sharedKeysRef.current = keys;
-            console.log('[Crypto] Keys refreshed. User IDs with keys:', Object.keys(keys));
+            console.log('[Crypto] Keys refreshed:', Object.keys(keys));
         } catch (err) {
             console.error('[refreshKeys failed]', err);
         }
@@ -103,7 +106,6 @@ export default function ChatWindow({ room, currentUser }) {
             }
             const key = sharedKeysRef.current[msg.user_id];
             if (!key) {
-                console.warn(`[Decrypt] No key for user ${msg.user_id}. Available keys:`, Object.keys(sharedKeysRef.current));
                 result.push({ ...msg, plaintext: '[Key unavailable]' });
                 continue;
             }
@@ -111,11 +113,49 @@ export default function ChatWindow({ room, currentUser }) {
                 const plaintext = await decryptMessage(key, msg.ciphertext, msg.iv);
                 result.push({ ...msg, plaintext });
             } catch (e) {
-                console.error(`[Decrypt Failed] user=${msg.user_id}`, e.name, e.message);
+                console.error(`[Decrypt Failed]`, e);
                 result.push({ ...msg, plaintext: '[Could not decrypt]' });
             }
         }
         return result;
+    };
+
+    const playNotificationSound = () => {
+        if (!audioRef.current) {
+            audioRef.current = new Audio('/notification.mp3');
+        }
+        audioRef.current.play().catch(e => console.log('[Sound blocked]', e));
+    };
+
+    const handleTyping = async (isTyping) => {
+        if (!roomRef.current) return;
+
+        try {
+            await client.post(`/rooms/${roomRef.current.id}/typing`, { is_typing: isTyping });
+        } catch (e) {
+            console.error('[Typing event failed]', e);
+        }
+    };
+
+    const onInputChange = (text) => {
+        if (!text.trim()) {
+            handleTyping(false);
+            if (typingTimeoutRef.current) {
+                clearTimeout(typingTimeoutRef.current);
+                typingTimeoutRef.current = null;
+            }
+            return;
+        }
+
+        handleTyping(true);
+
+        if (typingTimeoutRef.current) {
+            clearTimeout(typingTimeoutRef.current);
+        }
+
+        typingTimeoutRef.current = setTimeout(() => {
+            handleTyping(false);
+        }, 2000);
     };
 
     useRoomChannel(
@@ -124,11 +164,10 @@ export default function ChatWindow({ room, currentUser }) {
             const currentUser = userRef.current;
             if (event.sender.id === currentUser?.id) return;
 
-            console.log('[WS] Message from user', event.sender.id, '| Keys available:', Object.keys(sharedKeysRef.current));
+            console.log('[WS] Message from', event.sender.id);
 
             let key = sharedKeysRef.current[event.sender.id];
             if (!key) {
-                console.warn('[WS] Key missing, refreshing...');
                 await refreshKeys();
                 key = sharedKeysRef.current[event.sender.id];
             }
@@ -138,18 +177,10 @@ export default function ChatWindow({ room, currentUser }) {
                 try {
                     plaintext = await decryptMessage(key, event.ciphertext, event.iv);
                 } catch (e) {
-                    console.error('[WS Decrypt Failed]', e.name, e.message, {
-                        senderId:   event.sender.id,
-                        ciphertext: event.ciphertext?.slice(0, 20),
-                        iv:         event.iv,
-                    });
+                    console.error('[WS Decrypt Failed]', e);
                     plaintext = '[Could not decrypt]';
                 }
             }
-            // Notify RoomList of new unread message
-            window.dispatchEvent(new CustomEvent('new-message', {
-                detail: { roomId: roomRef.current?.id }
-            }));
 
             setMessages(prev => [...prev, {
                 ...event,
@@ -158,20 +189,48 @@ export default function ChatWindow({ room, currentUser }) {
                 created_at: event.created_at,
                 plaintext,
             }]);
+
+            // Play notification sound
+            playNotificationSound();
+
+            // Notify RoomList for unread count
+            window.dispatchEvent(new CustomEvent('new-message', {
+                detail: { roomId: roomRef.current?.id }
+            }));
         },
-        async () => {
-            console.log('[WS] Member joined, refreshing keys...');
+        async (member) => {
+            console.log('[WS] Member joined');
             await refreshKeys();
         },
-        () => {}
+        (member) => {},
+        (typingEvent) => {
+        const { user_id, user_name, is_typing } = typingEvent;
+        const currentUser = userRef.current;
+        if (user_id === currentUser?.id) return;
+
+        setTypingUsers(prev => {
+            if (is_typing) {
+                if (prev.find(u => u.id === user_id)) return prev;
+                return [...prev, { id: user_id, name: user_name }];
+            } else {
+                return prev.filter(u => u.id !== user_id);
+            }
+        });
+    }
     );
 
     const handleSend = async (text) => {
         if (!text.trim() || !ready) return;
 
+        // Stop typing indicator
+        handleTyping(false);
+        if (typingTimeoutRef.current) {
+            clearTimeout(typingTimeoutRef.current);
+        }
+
         const memberIds = Object.keys(sharedKeysRef.current);
         if (!memberIds.length) {
-            alert('No other members with keys. Ask them to open the room first.');
+            alert('No other members with keys.');
             return;
         }
 
@@ -243,7 +302,9 @@ export default function ChatWindow({ room, currentUser }) {
                 <div ref={bottomRef} />
             </div>
 
-            <MessageInput onSend={handleSend} disabled={!ready} />
+            <TypingIndicator typingUsers={typingUsers} />
+            <MessageInput onSend={handleSend} onTyping={onInputChange} disabled={!ready} />
+
             {showInvite && <InviteModal room={room} onClose={() => setShowInvite(false)} />}
         </div>
     );

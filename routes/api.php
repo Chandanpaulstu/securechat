@@ -32,6 +32,7 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     // Messages
     Route::get('/rooms/{room}/messages', [MessageController::class, 'index']);
     Route::post('/rooms/{room}/messages', [MessageController::class, 'store']);
+    Route::post('/rooms/{room}/typing', [MessageController::class, 'typing']);
 
     // Invites
     Route::post('/rooms/{room}/invite', [InviteController::class, 'send']);

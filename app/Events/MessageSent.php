@@ -15,8 +15,15 @@ class MessageSent implements ShouldBroadcast
     use Dispatchable, InteractsWithSockets, SerializesModels;
 
     public function __construct(
-        public Message $message,
-        public int $roomId
+    public int $id,
+    public int $roomId,
+    public int $userId,
+    public string $ciphertext,
+    public string $iv,
+    public string $integrity_hash,
+    public object $sender,
+    public string $created_at,
+    public ?int $reply_to = null
     ) {}
 
     public function broadcastOn(): array
@@ -35,13 +42,15 @@ class MessageSent implements ShouldBroadcast
     public function broadcastWith(): array
     {
         return [
-            'id'             => $this->message->id,
-            'room_id'        => $this->message->room_id,
-            'sender'         => $this->message->sender,
-            'ciphertext'     => $this->message->ciphertext,
-            'iv'             => $this->message->iv,
-            'integrity_hash' => $this->message->integrity_hash,
-            'created_at'     => $this->message->created_at,
+            'id'             => $this->id,
+            'room_id'        => $this->roomId,
+            'user_id'        => $this->userId,
+            'ciphertext'     => $this->ciphertext,
+            'iv'             => $this->iv,
+            'integrity_hash' => $this->integrity_hash,
+            'sender'         => $this->sender,
+            'created_at'     => $this->created_at,
+            'reply_to'       => $this->reply_to,
         ];
     }
 }

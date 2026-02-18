@@ -19,13 +19,10 @@ class MessageController extends Controller
     {
         $this->authorizeMember($room, $request->user()->id);
 
-        $messages = $room->messages()
-            ->with('sender:id,name,email')
-            ->latest()
-            ->take(50)
-            ->get()
-            ->reverse()
-            ->values();
+        $messages = Message::where('room_id', $room->id)
+            ->with(['sender', 'repliedMessage.sender'])
+            ->orderBy('created_at', 'asc')
+            ->get();
 
         return response()->json($messages);
     }
@@ -35,26 +32,43 @@ class MessageController extends Controller
     {
         $this->authorizeMember($room, $request->user()->id);
 
-        $data = $request->validate([
+        $validated = $request->validate([
             'ciphertext'      => 'required|string',
             'iv'              => 'required|string',
             'integrity_hash'  => 'required|string',
+            'reply_to'        => 'nullable|integer|exists:messages,id',
         ]);
 
         $message = Message::create([
             'room_id'        => $room->id,
             'user_id'        => $request->user()->id,
-            'ciphertext'     => $data['ciphertext'],
-            'iv'             => $data['iv'],
-            'integrity_hash' => $data['integrity_hash'],
+            'ciphertext'     => $validated['ciphertext'],
+            'iv'             => $validated['iv'],
+            'integrity_hash' => $validated['integrity_hash'],
+            'reply_to'       => $validated['reply_to'] ?? null,
+            'status'         => 'sent',
         ]);
 
-        $message->load('sender:id,name,email');
+        $message->load('sender');
 
-        // Broadcast to all room members via WebSocket
-        broadcast(new MessageSent($message, $room->id))->toOthers();
+        // Load replied message if exists
+        if ($message->reply_to) {
+            $message->load('repliedMessage.sender');
+        }
 
-        return response()->json($message, 201);
+        broadcast(new MessageSent(
+            $message->id,
+            $message->room_id,
+            $message->user_id,
+            $message->ciphertext,
+            $message->iv,
+            $message->integrity_hash,
+            $request->user(),
+            $message->created_at,
+            $message->reply_to
+        ))->toOthers();
+
+        return response()->json($message);
     }
 
     private function authorizeMember(Room $room, int $userId): void
@@ -137,6 +151,44 @@ public function markSeen(Request $request, Room $room)
     }
 
     return response()->json(['marked' => $messages->count()]);
+}
+
+public function update(Request $request, Room $room, $messageId)
+{
+    $this->authorizeMember($room, $request->user()->id);
+
+    $message = Message::findOrFail($messageId);
+
+    if ($message->room_id !== $room->id) {
+        return response()->json(['message' => 'Message not in room.'], 404);
+    }
+
+    if ($message->user_id !== $request->user()->id) {
+        return response()->json(['message' => 'Not your message.'], 403);
+    }
+
+    $validated = $request->validate([
+        'ciphertext'     => 'required|string',
+        'iv'             => 'required|string',
+        'integrity_hash' => 'required|string',
+    ]);
+
+    $message->update([
+        'ciphertext'     => $validated['ciphertext'],
+        'iv'             => $validated['iv'],
+        'integrity_hash' => $validated['integrity_hash'],
+        'edited_at'      => now(),
+    ]);
+
+    broadcast(new \App\Events\MessageEdited(
+        $message->id,
+        $room->id,
+        $validated['ciphertext'],
+        $validated['iv'],
+        $validated['integrity_hash']
+    ))->toOthers();
+
+    return response()->json($message);
 }
 
 public function destroy(Request $request, Room $room, $messageId)

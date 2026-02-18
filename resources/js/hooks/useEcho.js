@@ -101,7 +101,9 @@ export function useRoomChannel(roomId, onMessage, onJoin, onLeave, onTyping, onH
             .listen('.user.typing', (e) => onTyping?.(e))
             .listen('.message.delivered', (e) => onMessageDelivered?.(e))
             .listen('.message.seen', (e) => onMessageSeen?.(e))
-            .listen('.message.deleted', (e) => onMessageDeleted?.(e));
+            .listen('.message.deleted', (e) => onMessageDeleted?.(e))
+            .listen('.message.edited', (e) => onMessageEdited?.(e));
+
 
         channelRef.current = channel;
 

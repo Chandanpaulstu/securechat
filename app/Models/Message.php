@@ -13,4 +13,8 @@ class Message extends Model
     {
         return $this->belongsTo(User::class, 'user_id');
     }
+    public function repliedMessage()
+    {
+        return $this->belongsTo(Message::class, 'reply_to');
+    }
 }

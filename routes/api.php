@@ -35,6 +35,7 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     Route::post('/rooms/{room}/typing', [MessageController::class, 'typing']);
     Route::post('/rooms/{room}/messages/{message}/delivered', [MessageController::class, 'markDelivered']);
     Route::post('/rooms/{room}/mark-seen', [MessageController::class, 'markSeen']);
+    Route::put('/rooms/{room}/messages/{message}', [MessageController::class, 'update']);
     Route::delete('/rooms/{room}/messages/{message}', [MessageController::class, 'destroy']);
 
     // Invites

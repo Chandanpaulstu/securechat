@@ -1,0 +1,145 @@
+services:
+
+  # PHP Laravel App (PHP-FPM)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: securechat_app
+    restart: unless-stopped
+    working_dir: /var/www
+    volumes:
+      - .:/var/www
+      - ./docker/php/local.ini:/usr/local/etc/php/conf.d/local.ini
+    environment:
+      - APP_ENV=${APP_ENV:-local}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - securechat
+
+  # Nginx Web Server
+  nginx:
+    image: nginx:alpine
+    container_name: securechat_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"        # HTTP
+    volumes:
+      - .:/var/www
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - app
+    networks:
+      - securechat
+
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: securechat_mysql
+    restart: unless-stopped
+    ports:
+      - "3307:3306"    # expose for local DB tools (e.g. TablePlus)
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-securechat}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-secret}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-secret}
+      MYSQL_USER: ${DB_USERNAME:-securechat}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-p${DB_PASSWORD:-secret}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - securechat
+
+  # Redis (Cache + Queues)
+  redis:
+    image: redis:alpine
+    container_name: securechat_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - securechat
+
+  # Laravel Queue Worker
+  # Handles background jobs (email via Brevo, notifications, etc.)
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: securechat_worker
+    restart: unless-stopped
+    working_dir: /var/www
+    command: php artisan queue:listen --tries=3 --timeout=0
+    volumes:
+      - .:/var/www
+    depends_on:
+      - app
+      - redis
+    networks:
+      - securechat
+
+#Vite Dev Server (Hot Reload for React)
+  vite:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: securechat_vite
+    restart: unless-stopped
+    working_dir: /var/www
+    command: sh -c "npm install && npm run dev"
+    ports:
+      - "5173:5173"
+    volumes:
+      - .:/var/www
+      - /var/www/node_modules
+    depends_on:
+      - app
+    networks:
+      - securechat
+
+  # Laravel Reverb WebSocket Server
+  # Powers real-time chat via laravel/reverb
+  reverb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: securechat_reverb
+    restart: unless-stopped
+    working_dir: /var/www
+    command: php artisan reverb:start --host=0.0.0.0 --port=8080
+    ports:
+      - "8080:8080"    # browser connects to ws://localhost:8080
+    volumes:
+      - .:/var/www
+    depends_on:
+      - app
+      - redis
+    networks:
+      - securechat
+
+#  Volumes
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+
+#  Networks
+networks:
+  securechat:
+    driver: bridge
